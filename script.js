@@ -301,7 +301,7 @@ function renderReportDetail() {
   const r=workspace.reports.find(item=>item.id===viewState.id);
   if(!r)return missingRecord("Report not found","reports");
   const editable=r.reviewStatus!=="Approved";
-  return `<div class="view-head"><div><p class="eyebrow">${monthLabel(r.reportingMonth)} report</p><h2>${escapeHTML(projectFor(r.projectId)?.name||"Unknown project")}</h2><p>${escapeHTML(staffFor(r.staffId)?.name||"Unknown staff")}</p></div><div><button class="secondary-button" data-nav="reports">Back</button> ${editable?`<button class="primary-button" data-report-edit="${r.id}">Edit report</button>`:`<button class="ghost-button" data-report-reopen="${r.id}">Reopen as Draft</button>`}</div></div>
+  return `<div class="view-head"><div><p class="eyebrow">${monthLabel(r.reportingMonth)} report</p><h2>${escapeHTML(projectFor(r.projectId)?.name||"Unknown project")}</h2><p>${escapeHTML(staffFor(r.staffId)?.name||"Unknown staff")}</p></div><div><button class="secondary-button" data-nav="reports">Back</button> <button class="secondary-button" data-report-export="${r.id}">Export PDF</button> ${editable?`<button class="primary-button" data-report-edit="${r.id}">Edit report</button>`:`<button class="ghost-button" data-report-reopen="${r.id}">Reopen as Draft</button>`}</div></div>
     <div class="review-banner ${r.reviewStatus==="Needs Changes"?"changes":""}"><div><strong>Review status</strong><div class="record-sub">Updated ${timestampLabel(r.updatedAt)}</div></div>${statusBadge(r.reviewStatus)}</div>
     <div class="detail-grid"><div class="detail-card">
       ${reportSection("Activities completed",r.activitiesCompleted)}${reportSection("Outcomes",r.outcomes)}${reportSection("Challenges",r.challenges)}${reportSection("Next steps",r.nextSteps)}${reportSection("Additional notes",r.additionalNotes||"No additional notes")}
@@ -452,6 +452,159 @@ function exportBackup(){
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=`report-manager-backup-${new Date().toISOString().slice(0,10)}.json`; a.click(); URL.revokeObjectURL(url); toast("Workspace backup exported. PIN settings were excluded.");
 }
 
+function pdfText(value, font, size){
+  const replacements={"\u2013":"-","\u2014":"-","\u2018":"'","\u2019":"'","\u201c":"\"","\u201d":"\"","\u2022":"-","\u2026":"...","\u00a0":" "};
+  return String(value??"").replace(/[\u2013\u2014\u2018\u2019\u201c\u201d\u2022\u2026\u00a0]/g,char=>replacements[char]).split("").map(char=>{
+    if(char==="\n"||char==="\r"||char==="\t")return char==="\t"?" ":char;
+    try{font.widthOfTextAtSize(char,size);return char;}catch{return "?";}
+  }).join("");
+}
+
+function wrapPdfText(value, font, size, maxWidth){
+  const text=pdfText(value,font,size).replace(/\r\n?/g,"\n");
+  const lines=[];
+  for(const paragraph of text.split("\n")){
+    if(!paragraph.trim()){lines.push("");continue;}
+    let line="";
+    for(const word of paragraph.trim().split(/\s+/)){
+      const candidate=line?`${line} ${word}`:word;
+      if(font.widthOfTextAtSize(candidate,size)<=maxWidth){line=candidate;continue;}
+      if(line){lines.push(line);line="";}
+      if(font.widthOfTextAtSize(word,size)<=maxWidth){line=word;continue;}
+      let chunk="";
+      for(const char of word){
+        if(chunk&&font.widthOfTextAtSize(chunk+char,size)>maxWidth){lines.push(chunk);chunk=char;}else chunk+=char;
+      }
+      line=chunk;
+    }
+    if(line)lines.push(line);
+  }
+  return lines.length?lines:[""];
+}
+
+function truncatePdfText(value, font, size, maxWidth){
+  const safe=pdfText(value,font,size).replace(/\s+/g," ").trim();
+  if(font.widthOfTextAtSize(safe,size)<=maxWidth)return safe;
+  let shortened=safe;
+  while(shortened&&font.widthOfTextAtSize(`${shortened}...`,size)>maxWidth)shortened=shortened.slice(0,-1);
+  return `${shortened.trimEnd()}...`;
+}
+
+async function exportSingleReportPdf(reportId){
+  const report=workspace.reports.find(item=>item.id===reportId);
+  const project=report&&projectFor(report.projectId);
+  const staff=report&&staffFor(report.staffId);
+  if(!report||!project||!staff){toast("PDF export failed because related report data is missing.","error");return;}
+  if(!window.PDFLib){toast("PDF export library could not be loaded.","error");return;}
+  try{
+    const {PDFDocument,StandardFonts,rgb}=window.PDFLib;
+    const pdfDocument=await PDFDocument.create();
+    pdfDocument.setTitle(`${project.name} - ${monthLabel(report.reportingMonth)} Monthly Report`);
+    pdfDocument.setAuthor(workspace.workspaceName||"Report Manager");
+    pdfDocument.setSubject("Single Monthly Report");
+    pdfDocument.setCreator("Report Manager");
+    const regular=await pdfDocument.embedFont(StandardFonts.Helvetica);
+    const bold=await pdfDocument.embedFont(StandardFonts.HelveticaBold);
+    const pageWidth=595.28,pageHeight=841.89,margin=52,bottom=58,contentWidth=pageWidth-margin*2;
+    const green=rgb(.09,.42,.34),dark=rgb(.09,.20,.18),muted=rgb(.39,.46,.44),line=rgb(.86,.90,.88),white=rgb(1,1,1);
+    const statusColours={Draft:rgb(.38,.44,.42),Submitted:rgb(.18,.38,.61),Approved:green,"Needs Changes":rgb(.66,.24,.24)};
+    let page,y;
+
+    const addPage=(first=false)=>{
+      page=pdfDocument.addPage([pageWidth,pageHeight]);
+      if(first){
+        page.drawRectangle({x:0,y:pageHeight-132,width:pageWidth,height:132,color:green});
+        page.drawText(truncatePdfText(workspace.workspaceName||"Report Manager",bold,10,contentWidth),{x:margin,y:pageHeight-38,size:10,font:bold,color:white});
+        page.drawText("Monthly Report",{x:margin,y:pageHeight-76,size:25,font:bold,color:white});
+        page.drawText(truncatePdfText(project.name,regular,13,contentWidth),{x:margin,y:pageHeight-103,size:13,font:regular,color:white});
+        y=pageHeight-164;
+      }else{
+        page.drawText("REPORT MANAGER",{x:margin,y:pageHeight-38,size:9,font:bold,color:green});
+        page.drawText(truncatePdfText(`${project.name} | ${monthLabel(report.reportingMonth)} | ${report.reviewStatus}`,regular,9,330),{x:pageWidth-margin-330,y:pageHeight-38,size:9,font:regular,color:muted});
+        page.drawLine({start:{x:margin,y:pageHeight-48},end:{x:pageWidth-margin,y:pageHeight-48},thickness:1,color:line});
+        y=pageHeight-72;
+      }
+    };
+    const ensureSpace=required=>{if(y-required<bottom)addPage(false);};
+    const drawParagraph=(value,size=10.5,leading=15)=>{
+      for(const textLine of wrapPdfText(value||"Not provided.",regular,size,contentWidth)){
+        ensureSpace(leading);
+        if(textLine)page.drawText(textLine,{x:margin,y,size,font:regular,color:dark});
+        y-=leading;
+      }
+    };
+    const drawSection=(title,value)=>{
+      ensureSpace(58);
+      page.drawText(title.toUpperCase(),{x:margin,y,size:9.5,font:bold,color:green});
+      y-=9;
+      page.drawLine({start:{x:margin,y},end:{x:pageWidth-margin,y},thickness:.8,color:line});
+      y-=17;
+      drawParagraph(value);
+      y-=12;
+    };
+    const drawMeta=(label,value,x,columnWidth)=>{
+      page.drawText(label.toUpperCase(),{x,y,size:8.5,font:bold,color:muted});
+      page.drawText(truncatePdfText(value||"Not provided",bold,11,columnWidth),{x,y:y-18,size:11,font:bold,color:dark});
+    };
+
+    addPage(true);
+    const statusText=`STATUS: ${report.reviewStatus.toUpperCase()}`;
+    const statusWidth=bold.widthOfTextAtSize(statusText,9.5)+22;
+    page.drawRectangle({x:margin,y:y-4,width:statusWidth,height:24,color:statusColours[report.reviewStatus]||muted});
+    page.drawText(statusText,{x:margin+11,y:y+4,size:9.5,font:bold,color:white});
+    y-=48;
+    const columnGap=24,columnWidth=(contentWidth-columnGap)/2;
+    drawMeta("Project",project.name,margin,columnWidth);
+    drawMeta("Reporting month",monthLabel(report.reportingMonth),margin+columnWidth+columnGap,columnWidth);
+    y-=48;
+    drawMeta("Funding body",project.fundingBody,margin,columnWidth);
+    drawMeta("Staff member",staff.name,margin+columnWidth+columnGap,columnWidth);
+    y-=52;
+    page.drawLine({start:{x:margin,y},end:{x:pageWidth-margin,y},thickness:1,color:line});
+    y-=25;
+
+    drawSection("Activities completed",report.activitiesCompleted);
+    drawSection("Outcomes",report.outcomes);
+    drawSection("Challenges",report.challenges);
+    drawSection("Next steps",report.nextSteps);
+    drawSection("Additional notes",report.additionalNotes);
+    drawSection("Supervisor comments",report.supervisorComments);
+
+    const timestamps=[["Review status",report.reviewStatus],["Created",timestampLabel(report.createdAt)],["Updated",timestampLabel(report.updatedAt)]];
+    if(report.submittedAt)timestamps.push(["Submitted",timestampLabel(report.submittedAt)]);
+    if(report.reviewedAt)timestamps.push(["Reviewed",timestampLabel(report.reviewedAt)]);
+    ensureSpace(38+timestamps.length*16);
+    page.drawText("REPORT DETAILS",{x:margin,y,size:9.5,font:bold,color:green});
+    y-=9;
+    page.drawLine({start:{x:margin,y},end:{x:pageWidth-margin,y},thickness:.8,color:line});
+    y-=19;
+    for(const [label,value] of timestamps){
+      ensureSpace(16);
+      page.drawText(`${label}:`,{x:margin,y,size:9.5,font:bold,color:muted});
+      page.drawText(pdfText(value,regular,9.5),{x:margin+78,y,size:9.5,font:regular,color:dark});
+      y-=16;
+    }
+
+    const pages=pdfDocument.getPages();
+    pages.forEach((item,index)=>{
+      item.drawLine({start:{x:margin,y:40},end:{x:pageWidth-margin,y:40},thickness:.7,color:line});
+      item.drawText(truncatePdfText(workspace.workspaceName||"Report Manager",regular,8,300),{x:margin,y:25,size:8,font:regular,color:muted});
+      const pageNumber=`Page ${index+1} of ${pages.length}`;
+      item.drawText(pageNumber,{x:pageWidth-margin-regular.widthOfTextAtSize(pageNumber,8),y:25,size:8,font:regular,color:muted});
+    });
+    const bytes=await pdfDocument.save();
+    const blob=new Blob([bytes],{type:"application/pdf"});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement("a");
+    const slug=`${project.name}-${report.reportingMonth}-${staff.name}`.normalize("NFKD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
+    link.href=url;link.download=`${slug||"monthly-report"}.pdf`;link.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+    toast("Monthly report PDF exported.");
+  }catch(error){
+    toast(`PDF export failed: ${error.message||"Unknown error."}`,"error");
+  }
+}
+
 function validateBackup(data){
   if(!data||typeof data!=="object")throw new Error("The file does not contain a workspace object.");
   if(!Number.isInteger(Number(data.schemaVersion)))throw new Error("Missing schema version.");
@@ -531,6 +684,7 @@ function handleMainClick(event){
   if(t.dataset.filterReportsProject)navigate("reports",{project:t.dataset.filterReportsProject});
   if(t.dataset.reportTransition)changeReportStatus(t.dataset.id,t.dataset.reportTransition);
   if(t.dataset.reportReopen)changeReportStatus(t.dataset.reportReopen,"Draft");
+  if(t.dataset.reportExport)exportSingleReportPdf(t.dataset.reportExport);
   if(t.id==="export-backup")exportBackup();
   if(t.id==="choose-restore")$("#restore-input").click();
   if(t.id==="settings-lock")lockWorkspace();
