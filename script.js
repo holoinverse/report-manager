@@ -326,6 +326,7 @@ function renderSettings() {
     <form class="settings-card" id="privacy-settings"><h3>Privacy lock</h3><p>${privacy.pinHash?"A local PIN is active on this device.":"Create a PIN to discourage casual access when you step away."}</p><label>${privacy.pinHash?"New PIN (leave blank to keep current)":"Create PIN"}<input name="pin" type="password" inputmode="numeric" minlength="4" maxlength="12" pattern="[0-9]{4,12}" placeholder="4–12 digits"></label><label>Confirm PIN<input name="confirmPin" type="password" inputmode="numeric" minlength="4" maxlength="12" pattern="[0-9]{4,12}"></label><label>Auto-lock<select name="autoLock">${AUTO_LOCK_OPTIONS.map(value=>`<option value="${value}" ${Number(privacy.autoLockMinutes)===value?"selected":""}>${value===0?"Off":`${value} minutes`}</option>`).join("")}</select></label><button class="primary-button" type="submit">Save privacy settings</button> ${privacy.pinHash?'<button class="secondary-button" type="button" id="remove-pin">Remove PIN</button>':''}</form>
     <section class="settings-card"><h3>Lock now</h3><p>Hide workspace information immediately. Unlocking requires the local PIN.</p><button class="secondary-button" id="settings-lock" ${privacy.pinHash?"":"disabled"}>Lock workspace</button></section>
     <section class="settings-card danger-zone"><h3>Reset sample workspace</h3><p>Replace all workspace data with the original demonstration projects, staff, tasks and reports. Privacy settings remain unchanged.</p><button class="danger-button" id="reset-sample">Reset to sample data</button></section>
+    <section class="settings-card danger-zone"><h3>Clear All Workspace Data</h3><p>Permanently remove all projects, staff, tasks and reports. The workspace name and privacy settings will remain.</p><button class="danger-button" id="clear-workspace-data">Clear All Workspace Data</button></section>
   </div>`;
 }
 
@@ -357,6 +358,9 @@ function openEntityDialog(type,id=null,extra={}) {
   } else if(type==="review"){
     const item=workspace.reports.find(r=>r.id===id); title=extra.status; eyebrow="Supervisor review"; submit=extra.status==="Needs Changes"?"Return report":"Confirm"; dialogContext.status=extra.status;
     body=`<div class="span-2"><p class="muted">${extra.status==="Needs Changes"?"Explain what must be revised before this report can be resubmitted.":`Change this report to ${extra.status}.`}</p></div><label class="span-2">Supervisor comments ${extra.status==="Needs Changes"?"*":""}<textarea name="supervisorComments" ${extra.status==="Needs Changes"?"required":""} maxlength="4000">${escapeHTML(item.supervisorComments||"")}</textarea></label>`;
+  } else if(type==="clear"){
+    title="Clear All Workspace Data"; eyebrow="Permanent action"; submit="Clear workspace data";
+    body=`<div class="span-2"><p class="muted">This permanently removes all projects, staff, tasks and reports. The workspace name and privacy settings will remain.</p></div><label class="span-2">Type DELETE to confirm *<input name="confirmation" required autocomplete="off"></label>`;
   }
   $("#dialog-eyebrow").textContent=eyebrow; $("#dialog-title").textContent=title; $("#dialog-body").innerHTML=body; $("#dialog-submit").textContent=submit;
   setFormBaseline($("#entity-form"));
@@ -389,6 +393,18 @@ function saveEntity(event){
     report.reviewStatus=status; report.supervisorComments=data.supervisorComments; report.updatedAt=stamp;
     if(status==="Submitted")report.submittedAt=stamp;
     if(["Approved","Needs Changes"].includes(status))report.reviewedAt=stamp;
+  } else if(type==="clear"){
+    if(data.confirmation!=="DELETE"){toast("Workspace data was not cleared. Type DELETE exactly to confirm.","error");return;}
+    workspace.projects=[];
+    workspace.staff=[];
+    workspace.tasks=[];
+    workspace.reports=[];
+    saveWorkspace();
+    dirtyForms.delete("entity-form");
+    $("#entity-dialog").close();
+    render();
+    toast("All workspace data was cleared successfully. Workspace and privacy settings were preserved.");
+    return;
   }
   saveWorkspace(); dirtyForms.delete("entity-form"); $("#entity-dialog").close(); toast(`${type==="review"?"Review":"Record"} saved.`);
   if(type==="report"&& !id){const last=workspace.reports.at(-1);navigate("reportDetail",{id:last.id});} else render();
@@ -519,6 +535,7 @@ function handleMainClick(event){
   if(t.id==="choose-restore")$("#restore-input").click();
   if(t.id==="settings-lock")lockWorkspace();
   if(t.id==="reset-sample"&&confirm("Replace the entire workspace with the original sample data? This cannot be undone unless you export a backup first.")){workspace=makeSampleWorkspace();saveWorkspace();updateChrome();navigate("dashboard");toast("Sample workspace restored.");}
+  if(t.id==="clear-workspace-data"&&confirmDiscardChanges())openEntityDialog("clear");
   if(t.id==="remove-pin")removePin();
 }
 
